@@ -1,0 +1,13 @@
+# 依赖包目录
+node_modules/
+venv/
+dist/
+build/
+out/
+target/
+
+# 环境配置、密钥
+.env
+.env.local
+*.pem
+*.key
