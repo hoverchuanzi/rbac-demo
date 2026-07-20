@@ -1,61 +1,136 @@
 const bcrypt = require('bcrypt');
+const cors = require('cors');
 const express = require('express');
+const helmet = require('helmet');
 const jwt = require('jsonwebtoken');
 const pool = require('./db');
 
 const app = express();
 const port = process.env.PORT || 3000;
 
-// 让 Express 能够读取 JSON 请求体。
-// 如果没有这一行，req.body 通常会是 undefined。
+if (!process.env.JWT_SECRET) {
+  throw new Error('Missing JWT_SECRET environment variable');
+}
+
+app.use(helmet());
+app.use(cors());
 app.use(express.json());
 app.use(express.urlencoded({ extended: false }));
 
-// 启动时检查必要配置，避免运行到登录时才发现密钥缺失。
-if (!process.env.JWT_SECRET) {
-  throw new Error('缺少 JWT_SECRET 环境变量');
+function success(res, data, message = 'ok') {
+  return res.json({ code: 0, data, message });
 }
 
-/**
- * 用户登录
- *
- * 请求体：
- * {
- *   "username": "admin",
- *   "password": "用户输入的密码"
- * }
- */
+function failure(res, status, message, code = status) {
+  return res.status(status).json({ code, data: null, message });
+}
+
+function authenticate(req, res, next) {
+  const authorization = req.get('authorization') || '';
+  const match = authorization.match(/^Bearer\s+(.+)$/i);
+
+  if (!match) {
+    return failure(res, 401, '未提供有效的访问令牌');
+  }
+
+  try {
+    const payload = jwt.verify(match[1], process.env.JWT_SECRET);
+
+    if (!payload || typeof payload !== 'object' || !payload.userId) {
+      return failure(res, 401, '访问令牌无效');
+    }
+
+    req.auth = { userId: payload.userId };
+    return next();
+  } catch (error) {
+    if (error instanceof jwt.TokenExpiredError) {
+      return failure(res, 401, '访问令牌已过期');
+    }
+
+    return failure(res, 401, '访问令牌无效');
+  }
+}
+
+function buildMenuTree(rows) {
+  const menusById = new Map();
+
+  for (const row of rows) {
+    const extraMeta =
+      row.extra_meta &&
+      typeof row.extra_meta === 'object' &&
+      !Array.isArray(row.extra_meta)
+        ? row.extra_meta
+        : {};
+    const meta = {
+      ...extraMeta,
+      title: row.title,
+      order: row.sort_order,
+      hideInMenu: row.is_hidden,
+      keepAlive: row.keep_alive,
+    };
+
+    if (row.icon) {
+      meta.icon = row.icon;
+    }
+
+    const menu = {
+      name: row.name,
+      path: row.path,
+      meta,
+    };
+
+    if (row.component) {
+      menu.component = row.component;
+    }
+
+    if (row.redirect) {
+      menu.redirect = row.redirect;
+    }
+
+    menusById.set(String(row.id), {
+      menu,
+      parentId: row.parent_id === null ? null : String(row.parent_id),
+    });
+  }
+
+  const roots = [];
+
+  for (const entry of menusById.values()) {
+    if (entry.parentId === null) {
+      roots.push(entry.menu);
+      continue;
+    }
+
+    const parent = menusById.get(entry.parentId);
+
+    // A child without an accessible parent cannot form a valid menu route.
+    if (!parent) {
+      continue;
+    }
+
+    parent.menu.children ??= [];
+    parent.menu.children.push(entry.menu);
+  }
+
+  return roots;
+}
+
 app.post('/auth/login', async (req, res, next) => {
   try {
-    // req.body may be undefined when the request has no body or uses an
-    // unsupported Content-Type. Treat it as an empty object so validation can
-    // return a useful 400 response instead of throwing a TypeError.
     const { username, password } = req.body ?? {};
 
-    // 第一层输入检查。
     if (
       typeof username !== 'string' ||
       username.trim() === '' ||
       typeof password !== 'string' ||
       password === ''
     ) {
-      return res.status(400).json({
-        message: '用户名和密码不能为空',
-      });
+      return failure(res, 400, '用户名和密码不能为空');
     }
 
-    // 用户名在数据库中按不区分大小写的方式查找。
-    // 只允许有效用户登录。
     const userResult = await pool.query(
       `
-        SELECT
-          id,
-          username,
-          password_hash,
-          real_name,
-          avatar,
-          email,
-          is_active
+        SELECT id, password_hash
         FROM users
         WHERE lower(username) = lower($1)
           AND is_active = TRUE
@@ -64,105 +139,130 @@ app.post('/auth/login', async (req, res, next) => {
       [username.trim()],
     );
 
-    // 无论是用户不存在、被禁用，还是密码错误，
-    // 都返回相同提示，避免向外泄露用户是否存在。
-    if (userResult.rowCount === 0) {
-      return res.status(401).json({
-        message: '用户名或密码错误',
-      });
-    }
-
     const user = userResult.rows[0];
-
-    // bcrypt.compare 会读取哈希中的盐值和计算成本，
-    // 然后判断明文密码是否匹配。
-    const passwordMatched = await bcrypt.compare(password, user.password_hash);
+    const passwordMatched = user
+      ? await bcrypt.compare(password, user.password_hash)
+      : false;
 
     if (!passwordMatched) {
-      return res.status(401).json({
-        message: '用户名或密码错误',
-      });
+      return failure(res, 401, '用户名或密码错误');
     }
 
-    // 查询用户当前拥有的有效角色。
-    const roleResult = await pool.query(
-      `
-        SELECT DISTINCT r.code
-        FROM user_roles ur
-        JOIN roles r
-          ON r.id = ur.role_id
-         AND r.is_active = TRUE
-        WHERE ur.user_id = $1
-        ORDER BY r.code
-      `,
-      [user.id],
-    );
-
-    const roles = roleResult.rows.map((role) => role.code);
-
-    // JWT 只保存稳定的用户 ID。
-    // 不把密码、密码哈希或完整权限列表放进 Token。
-    const accessToken = jwt.sign(
-      {
-        userId: user.id,
-      },
-      process.env.JWT_SECRET,
-      {
-        expiresIn: process.env.JWT_EXPIRES_IN || '2h',
-      },
-    );
-
-    // 登录成功后记录最后登录时间。
-    await pool.query(
-      `
-        UPDATE users
-        SET last_login_at = CURRENT_TIMESTAMP
-        WHERE id = $1
-      `,
-      [user.id],
-    );
-
-    // 返回前端需要的数据。
-    // 注意：绝对不能返回 password_hash。
-    return res.json({
-      accessToken,
-      user: {
-        id: user.id,
-        username: user.username,
-        realName: user.real_name,
-        avatar: user.avatar,
-        email: user.email,
-        roles,
-      },
+    const accessToken = jwt.sign({ userId: user.id }, process.env.JWT_SECRET, {
+      expiresIn: process.env.JWT_EXPIRES_IN || '2h',
     });
+
+    await pool.query(
+      'UPDATE users SET last_login_at = CURRENT_TIMESTAMP WHERE id = $1',
+      [user.id],
+    );
+
+    return success(res, { accessToken }, '登录成功');
   } catch (error) {
-    next(error);
+    return next(error);
   }
 });
 
-// 临时健康检查接口。
-app.get('/health', (req, res) => {
-  res.json({
-    status: 'ok',
-  });
+app.get('/user/info', authenticate, async (req, res, next) => {
+  try {
+    const userResult = await pool.query(
+      `
+        SELECT
+          u.id,
+          u.username,
+          u.real_name,
+          u.avatar,
+          u.email,
+          COALESCE(
+            array_agg(DISTINCT r.code ORDER BY r.code)
+              FILTER (WHERE r.code IS NOT NULL),
+            ARRAY[]::varchar[]
+          ) AS roles
+        FROM users u
+        LEFT JOIN user_roles ur ON ur.user_id = u.id
+        LEFT JOIN roles r ON r.id = ur.role_id AND r.is_active = TRUE
+        WHERE u.id = $1
+          AND u.is_active = TRUE
+        GROUP BY u.id
+      `,
+      [req.auth.userId],
+    );
+
+    if (userResult.rowCount === 0) {
+      return failure(res, 401, '用户不存在或已被禁用');
+    }
+
+    const user = userResult.rows[0];
+    return success(res, {
+      id: user.id,
+      username: user.username,
+      realName: user.real_name,
+      avatar: user.avatar,
+      email: user.email,
+      roles: user.roles,
+    });
+  } catch (error) {
+    return next(error);
+  }
 });
 
-// 404 处理。
-// 必须放在所有正常路由之后。
-app.use((req, res) => {
-  res.status(404).json({
-    message: '接口不存在',
-  });
+app.get('/menu/all', authenticate, async (req, res, next) => {
+  try {
+    const userResult = await pool.query(
+      'SELECT 1 FROM users WHERE id = $1 AND is_active = TRUE',
+      [req.auth.userId],
+    );
+
+    if (userResult.rowCount === 0) {
+      return failure(res, 401, '用户不存在或已被禁用');
+    }
+
+    const menuResult = await pool.query(
+      `
+        SELECT
+          m.id,
+          m.parent_id,
+          m.name,
+          m.path,
+          m.component,
+          m.redirect,
+          m.title,
+          m.icon,
+          m.sort_order,
+          m.is_hidden,
+          m.keep_alive,
+          m.extra_meta
+        FROM menus m
+        WHERE m.is_active = TRUE
+          AND EXISTS (
+            SELECT 1
+            FROM user_roles ur
+            JOIN roles r
+              ON r.id = ur.role_id
+             AND r.is_active = TRUE
+            JOIN role_menus rm
+              ON rm.role_id = r.id
+             AND rm.menu_id = m.id
+            WHERE ur.user_id = $1
+          )
+        ORDER BY m.sort_order, m.id
+      `,
+      [req.auth.userId],
+    );
+
+    return success(res, buildMenuTree(menuResult.rows));
+  } catch (error) {
+    return next(error);
+  }
 });
 
-// 统一错误处理。
-// Express 的错误处理中间件必须有四个参数。
+app.get('/health', (req, res) => success(res, { status: 'ok' }));
+
+app.use((req, res) => failure(res, 404, '接口不存在'));
+
 app.use((error, req, res, next) => {
   console.error(error);
-
-  res.status(500).json({
-    message: '服务器内部错误',
-  });
+  return failure(res, 500, '服务器内部错误');
 });
 
 app.listen(port, () => {
