@@ -1,5 +1,6 @@
 -- 在 rbac 数据库中执行：
 -- psql -U postgres -h localhost -d rbac -f database/01-schema.sql
+-- PGCLIENTENCODING=UTF8 psql -U postgres -h localhost -d rbac -f database/01-schema.sql
 
 BEGIN;
 
@@ -207,4 +208,3 @@ JOIN menus m ON m.name IN ('System', 'UserManagement')
 WHERE r.code = 'viewer';
 
 COMMIT;
-
