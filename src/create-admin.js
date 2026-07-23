@@ -4,14 +4,14 @@ const pool = require('./db');
 async function createAdmin() {
   // 目前先直接写在脚本里。
   // 脚本执行成功后，请删除这里的明文密码或删除整个脚本。
-  // const username = 'stefanie';
-  // const password = '780723';
-  // const realName = '孙燕姿';
-  // const email = null;
-  const username = 'flh';
-  const password = '001018';
-  const realName = '范流洪';
+  const username = 'stefanie';
+  const password = '780723';
+  const realName = '孙燕姿';
   const email = null;
+  // const username = 'flh';
+  // const password = '001018';
+  // const realName = '范流洪';
+  // const email = null;
 
   // bcrypt 的计算成本。
   // 12 比较适合目前的 Demo，数值越大计算越慢。
