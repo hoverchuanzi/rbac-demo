@@ -17,6 +17,47 @@ app.use(cors());
 app.use(express.json());
 app.use(express.urlencoded({ extended: false }));
 
+const sensitiveFields = new Set([
+  'authorization',
+  'cookie',
+  'password',
+  'token',
+  'access_token',
+  'refresh_token',
+]);
+
+function redactSensitiveData(value) {
+  if (Array.isArray(value)) {
+    return value.map(redactSensitiveData);
+  }
+
+  if (value && typeof value === 'object') {
+    return Object.fromEntries(
+      Object.entries(value).map(([key, item]) => [
+        key,
+        sensitiveFields.has(key.toLowerCase()) ? '[REDACTED]' : redactSensitiveData(item),
+      ]),
+    );
+  }
+
+  return value;
+}
+
+app.use((req, res, next) => {
+  console.log('[request]', {
+    time: new Date().toISOString(),
+    host: req.get('host'),
+    method: req.method,
+    url: req.originalUrl,
+    ip: req.ip,
+    headers: redactSensitiveData(req.headers),
+    query: redactSensitiveData(req.query),
+    body: redactSensitiveData(req.body),
+  });
+
+  next();
+});
+
 function success(res, data, message = 'ok') {
   return res.json({ code: 0, data, message });
 }

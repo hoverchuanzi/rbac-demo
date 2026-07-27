@@ -2,16 +2,16 @@ const bcrypt = require('bcrypt');
 const pool = require('./db');
 
 async function createAdmin() {
-  // 目前先直接写在脚本里。
-  // 脚本执行成功后，请删除这里的明文密码或删除整个脚本。
-  const username = 'stefanie';
-  const password = '780723';
-  const realName = '孙燕姿';
-  const email = null;
-  // const username = 'flh';
-  // const password = '001018';
-  // const realName = '范流洪';
-  // const email = null;
+  const username = process.env.ADMIN_USERNAME;
+  const password = process.env.ADMIN_PASSWORD;
+  const realName = process.env.ADMIN_REAL_NAME;
+  const email = process.env.ADMIN_EMAIL || null;
+
+  if (!username || !password || !realName) {
+    throw new Error(
+      '请设置 ADMIN_USERNAME、ADMIN_PASSWORD 和 ADMIN_REAL_NAME 环境变量',
+    );
+  }
 
   // bcrypt 的计算成本。
   // 12 比较适合目前的 Demo，数值越大计算越慢。
