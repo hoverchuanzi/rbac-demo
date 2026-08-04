@@ -9,6 +9,14 @@ const menuRoutes = require('./routes/menus');
 const app = express();
 const port = process.env.PORT || 3000;
 
+if (process.env.TRUST_PROXY) {
+  const trustProxyHops = Number.parseInt(process.env.TRUST_PROXY, 10);
+  app.set(
+    'trust proxy',
+    Number.isNaN(trustProxyHops) ? process.env.TRUST_PROXY : trustProxyHops,
+  );
+}
+
 if (!process.env.JWT_SECRET) {
   throw new Error('Missing JWT_SECRET environment variable');
 }
@@ -18,44 +26,8 @@ app.use(cors());
 app.use(express.json());
 app.use(express.urlencoded({ extended: false }));
 
-const sensitiveFields = new Set([
-  'authorization',
-  'cookie',
-  'password',
-  'token',
-  'access_token',
-  'refresh_token',
-]);
-
-function redactSensitiveData(value) {
-  if (Array.isArray(value)) {
-    return value.map(redactSensitiveData);
-  }
-
-  if (value && typeof value === 'object') {
-    return Object.fromEntries(
-      Object.entries(value).map(([key, item]) => [
-        key,
-        sensitiveFields.has(key.toLowerCase()) ? '[REDACTED]' : redactSensitiveData(item),
-      ]),
-    );
-  }
-
-  return value;
-}
-
 app.use((req, res, next) => {
-  console.log('[request]', {
-    time: new Date().toISOString(),
-    host: req.get('host'),
-    method: req.method,
-    url: req.originalUrl,
-    ip: req.ip,
-    headers: redactSensitiveData(req.headers),
-    query: redactSensitiveData(req.query),
-    body: redactSensitiveData(req.body),
-  });
-
+  console.log(`[request] ${new Date().toISOString()} ${req.method} ${req.originalUrl}`);
   next();
 });
 app.use(authRoutes);
